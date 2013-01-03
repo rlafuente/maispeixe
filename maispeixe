@@ -1,0 +1,223 @@
+#!/usr/bin/env python
+
+# MaisPeixe v0.1
+# ==============
+# copyright 2008 ricardo lafuente
+# licensed under the GPL v3
+
+# Uses and extends the MySpace parser by Tom Dyson
+# (http://www.throwingbeans.org)
+# and the mp3 scrape logic from the XBox Media
+# Center plugin suite by Unbehagen
+# http://theendofthelongestline.de/xbox/download/index.php
+
+# Requires BeautifulSoup, tested on version 3:
+# http://www.crummy.com/software/BeautifulSoup/
+
+# usage: 
+# from maispeixe import *
+# n = MaisPeixe('etjusticepourtous')
+# total_friends = n.friend_count
+# last_comment = n.comments[0]
+
+__version__ = "0.1"
+__license__ = "GPL 3"
+__author__ = "ricardo lafuente"
+
+__all__ = ["MaisPeixe"]
+
+import sys
+
+try:
+    import BeautifulSoup
+except ImportError:
+    print "error: BeautifulSoup module missing"
+    print "you will need the python-beautifulsoup package :("
+    print "  Ubuntu: sudo apt-get install python-beautifulsoup"
+    print "  OSX (MacPorts): sudo port install py-beautifulsoup"
+    sys.exit()
+
+import re
+import urllib
+
+# Entity decoding from SBP's getlinks.py
+import htmlentitydefs
+htmlentitydefs.name2codepoint['apos'] = 0x27
+
+r_entity = re.compile(r'&(#x[0-9A-Fa-f]+|#[0-9]+|[A-Za-z]+);')
+
+def entity(m):
+    name = m.group(1)
+    if name.startswith('#x'): 
+        return unichr(int(name[2:].lstrip('0'), 16))
+    elif name.startswith('#'): 
+        return unichr(int(name[1:].lstrip('0')))
+    elif htmlentitydefs.name2codepoint.has_key(name): 
+        return unichr(htmlentitydefs.name2codepoint[name])
+    else: return '&' + name + ';'
+
+def decode_entities(s):
+    return r_entity.sub(entity, s)
+
+USER_AGENT = 'Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10.5; en-US; rv:1.9.0.1) Gecko/2008070206 Firefox/3.0.1'
+
+SPACE_STUB = 'http://www.myspace.com/'
+FRIEND_STUB = 'http://profile.myspace.com/index.cfm?fuseaction=user.viewprofile&friendid='
+MEDIA_STUB = 'http://mediaservices.myspace.com/services/media/musicplayerxml.ashx?b='
+FRIEND_HREF_ID = re.compile('ctl00_Main_ctl01_UserFriends1_F')
+FRIEND_COUNT_SPAN = 'redbtext searchMonkey-numberOfFriends'
+ADD_FRIEND_ID = 'ctl00_cpMain_ctl01_UserContactLinks1_AddFriendLink'
+COMMENT_TD = {'align':'center', 'valign':'top', 'width':'150', 'bgcolor':'FF9933', 'style':'word-wrap: break-word'}
+
+
+class MaisPeixe(object):
+
+    def __init__(self, myspace_name):
+        # get the HTML for MySpace URLs or numerical IDs
+        if myspace_name.isdigit():
+            html = urllib.urlopen(FRIEND_STUB + myspace_name).read()
+        else:    
+            html = urllib.urlopen(SPACE_STUB + myspace_name).read()
+        self.soup = BeautifulSoup.BeautifulSoup(html)
+        
+        # find MySpace name
+        self.name = self.soup.first('span','nametext').string
+        
+        # find MySpace URL
+        title = self.soup.title.string.strip()
+        title = title.replace('www.myspace.com/','')
+        if len(title): self.url = title
+        else: self.url = None
+
+        # find MySpace numerical ID
+        add_friend_href = self.soup.first('a',id=ADD_FRIEND_ID)['href']
+        self.id = re.search('friendID=([0-9]+)', add_friend_href).group(1)
+        
+        # find number of friends
+        self.friend_count = int(self.soup.first('span',FRIEND_COUNT_SPAN).string)
+        
+        # find Friends
+        friend_links = self.soup.findAll('a', id=FRIEND_HREF_ID)
+        self.top_friends = []
+        for link in friend_links:
+            if link.string and len(link.string.strip()):
+                friend_name = decode_entities(link.string.strip())
+                friend_id = link['href'].replace(FRIEND_STUB, '')
+                self.top_friends.append((friend_name, friend_id))
+                
+        # find influences
+        try:
+            self.influences = self.soup.first('td',id='ProfileInfluences').string
+        except:
+            self.influences = None
+            
+        # get comments
+        self.comments=[]
+        for td in self.soup.findAll("td", attrs = COMMENT_TD):
+            comment_link = td.first('a')
+            commenter = decode_entities(comment_link.string.strip())
+            comment_href = comment_link['href']
+            commenter_id = re.search('friendID=([0-9]+)', comment_href, re.IGNORECASE).group(1)
+            comment_td = td.nextSibling.nextSibling
+            comment_date = comment_td.first('span','blacktext10').string.strip()
+            comment_lines = []
+            for node in comment_td.contents:
+                if len(node):
+                    try: # look into why this is failing
+                        comment_line = node.string.strip()
+                        if comment_date not in comment_line:
+                            comment_lines.append(comment_line)
+                    except: pass
+            comment = ' '.join(comment_lines).strip()
+            self.comments.append((commenter, commenter_id, comment_date, comment))
+
+        # get song list
+        xml = urllib.urlopen(MEDIA_STUB + self.id).read()
+        songsoup = BeautifulSoup.BeautifulSoup(xml)
+        self.songlist = []
+        for song in songsoup.findAll("song"):
+            self.songlist.append(song)
+
+def main(name):
+    global options
+    try:
+        m = MaisPeixe(name)
+    except AttributeError:
+        print "user not found!"
+        import traceback
+        sys.stderr.write(traceback.format_exc())
+        sys.exit()
+    # not found?
+    if m.name is None:
+        print "user not found!"
+        sys.exit()
+
+    print 'Name:     ' + m.name
+    print 'ID:       ' + m.id
+    print 'Friends:  ' + str(m.friend_count)
+    print 
+    print 'User has %i songs available:' % (len(m.songlist))
+
+    import os
+    for song in m.songlist:
+        # get song title and URL
+        songname = song['title']
+        songurl = song['durl']
+        if options.show_urls:
+            print '  ' + songname + " - " + songurl
+        else:
+            print '  * ' + songname
+        filename = m.name + " - " + songname + ".mp3"
+
+        if options.download_all:
+            # run wget on this file
+            command = 'wget "%s" --output-document="%s" --user-agent="%s"' % (songurl, filename, USER_AGENT)
+            os.system(command)
+
+if __name__ == '__main__':
+
+    # set up the commandline option parser
+    from optparse import OptionParser
+    parser = OptionParser(usage = "usage: %prog myspaceusername(or id) [options]")
+
+    parser.add_option("-a", "--download-all",
+                      action="store_true", 
+                      dest="download_all", 
+                      default=False, 
+                      help="download all songs from user (requires wget)",
+                      )
+    parser.add_option("-n", "--no-download", 
+                      action="store_true", 
+                      dest="no_download", 
+                      default=True, 
+                      help="just show user info without downloading (default)",
+                      )
+    parser.add_option("-v", "--verbose", 
+                      help="set verbose output",
+                      action="store_true",
+                      dest="verbose",
+                      default=True,
+                      )
+    parser.add_option("-u", "--show-urls", 
+                      help="show the song URLs",
+                      action="store_true",
+                      dest="show_urls",
+                      default=False,
+                      )
+
+    (options, args) = parser.parse_args()
+
+    if not args:
+        print "error: no MySpace user specified!"
+        print
+        parser.print_help()
+        sys.exit()
+
+    if len(args) > 1:
+        print "error: too many arguments!"
+        print
+        parser.print_help()
+        sys.exit()
+
+    username = args[0]
+    main(username)
